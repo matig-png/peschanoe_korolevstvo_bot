@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ====================== КОНФИГУРАЦИЯ ======================
-TOKEN = "ТОКЕН_ТВОЕГО_НОВОГО_БОТА"
+TOKEN = os.getenv("MAIN_BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OWNER_ID = int(os.getenv("MAIN_ADMIN_ID"))
