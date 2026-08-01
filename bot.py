@@ -1,38 +1,33 @@
 import asyncio
 import logging
-import sys
 import os
 import re
 from datetime import datetime
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, Dict, Any, List
 
 from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.filters import Command, StateFilter, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, User
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, User, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-# Загрузка переменных окружения
 load_dotenv()
 
 # ====================== КОНФИГУРАЦИЯ ======================
-TOKEN = os.getenv("MAIN_BOT_TOKEN")
+TOKEN = "ТОКЕН_ТВОЕГО_НОВОГО_БОТА"
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OWNER_ID = int(os.getenv("MAIN_ADMIN_ID"))
 
-BOT_ID = "sparks"        # ID текущего бота
-MAIN_BOT_ID = "main"     # ID основного бота (для Лун)
+BOT_ID = "sparks"        # Валюта Искры ✨
+MAIN_BOT_ID = "main"     # Валюта Луны 🌗
 
-# КУРС: 1 Луна = 2 Искры (База: Луна=1.0, Искра=0.5)
-EXCHANGE_RATES = {
-    "main": 1.0,   # 🌗 Луны
-    "sparks": 0.5  # ✨ Искры
-}
+# КУРС: 1 Луна = 2 Искры
+EXCHANGE_RATES = {"main": 1.0, "sparks": 0.5}
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -55,25 +50,24 @@ class Database:
             data['created_at'] = datetime.now().isoformat()
             self.supabase.table('users').insert(data).execute()
 
-    def get_balance(self, user_id: int, bot_id: str = BOT_ID) -> float:
-        res = self.supabase.table('balances').select('*').eq('user_id', user_id).eq('bot_id', bot_id).execute()
+    def get_balance(self, user_id: int, b_id: str = BOT_ID) -> float:
+        res = self.supabase.table('balances').select('*').eq('user_id', user_id).eq('bot_id', b_id).execute()
         if not res.data: return 0
         row = res.data[0]
         return float('inf') if row['is_infinite'] else float(row['balance'])
 
-    def set_balance(self, user_id: int, amount: float, bot_id: str = BOT_ID):
+    def set_balance(self, user_id: int, amount: float, b_id: str = BOT_ID):
         is_inf = amount == float('inf')
         val = 0 if is_inf else amount
-        existing = self.supabase.table('balances').select('*').eq('user_id', user_id).eq('bot_id', bot_id).execute()
+        existing = self.supabase.table('balances').select('*').eq('user_id', user_id).eq('bot_id', b_id).execute()
         if existing.data:
-            self.supabase.table('balances').update({'balance': val, 'is_infinite': is_inf}).eq('user_id', user_id).eq('bot_id', bot_id).execute()
+            self.supabase.table('balances').update({'balance': val, 'is_infinite': is_inf}).eq('user_id', user_id).eq('bot_id', b_id).execute()
         else:
-            self.supabase.table('balances').insert({'user_id': user_id, 'bot_id': bot_id, 'balance': val, 'is_infinite': is_inf}).execute()
+            self.supabase.table('balances').insert({'user_id': user_id, 'bot_id': b_id, 'balance': val, 'is_infinite': is_inf}).execute()
 
     def get_bot_data(self, user_id: int) -> Dict:
         res = self.supabase.table('user_bot_data').select('*').eq('user_id', user_id).eq('bot_id', BOT_ID).execute()
-        if res.data: return res.data[0]
-        return {'is_frozen': False}
+        return res.data[0] if res.data else {'is_frozen': False}
 
     def set_bot_data(self, user_id: int, **kwargs):
         existing = self.supabase.table('user_bot_data').select('*').eq('user_id', user_id).eq('bot_id', BOT_ID).execute()
@@ -82,10 +76,6 @@ class Database:
         else:
             data = {'user_id': user_id, 'bot_id': BOT_ID, **kwargs}
             self.supabase.table('user_bot_data').insert(data).execute()
-
-    def get_top_users(self):
-        res = self.supabase.table('balances').select('user_id, balance, is_infinite').eq('bot_id', BOT_ID).order('balance', desc=True).execute()
-        return [u for u in res.data if not u['is_infinite']][:10]
 
     def find_user(self, input_str: str) -> Optional[int]:
         input_str = input_str.strip().lstrip('@').lower()
@@ -96,6 +86,10 @@ class Database:
         res = self.supabase.table('users').select('user_id').or_(f'username.ilike.%{input_str}%,name.ilike.%{input_str}%').execute()
         return res.data[0]['user_id'] if res.data else None
 
+    def get_top_sparks(self):
+        res = self.supabase.table('balances').select('user_id, balance, is_infinite').eq('bot_id', BOT_ID).order('balance', desc=True).limit(10).execute()
+        return [u for u in res.data if not u['is_infinite']]
+
 db = Database()
 
 # ====================== СОСТОЯНИЯ ======================
@@ -103,14 +97,24 @@ class EconomyStates(StatesGroup):
     WaitingConvertAmount = State()
     WaitingAdminAction = State()
 
+# ====================== ФИЛЬТРЫ ======================
+async def is_owner_filter(callback: CallbackQuery):
+    """Проверка: является ли нажавший тем, кто вызвал меню."""
+    # Если бот ответил пользователю (меню вызвано командой), проверяем ID
+    if callback.message.reply_to_message:
+        if callback.from_user.id != callback.message.reply_to_message.from_user.id:
+            await callback.answer("❌ Это не ваше меню! Вызовите своё через /start", show_alert=True)
+            return False
+    return True
+
 # ====================== КЛАВИАТУРЫ ======================
 def main_menu(user_id: int):
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="✨ Баланс", callback_data="bal"),
-                InlineKeyboardButton(text="🏆 Топ богачей", callback_data="top"))
-    builder.row(InlineKeyboardButton(text="💱 Конвертация", callback_data="convert"))
+    builder.row(InlineKeyboardButton(text="✨ Мой Баланс", callback_data="bal"),
+                InlineKeyboardButton(text="🏆 Топ Искр", callback_data="top"))
+    builder.row(InlineKeyboardButton(text="💱 Обмен (Искры <-> Луны)", callback_data="conv"))
     if user_id == OWNER_ID:
-        builder.row(InlineKeyboardButton(text="⚙️ Админ-панель", callback_data="admin"))
+        builder.row(InlineKeyboardButton(text="⚙️ Админ-панель", callback_data="adm"))
     return builder.as_markup()
 
 def cancel_kb():
@@ -125,151 +129,171 @@ async def cmd_start(message: types.Message, state: FSMContext):
     db.create_or_update_user(message.from_user)
     if message.from_user.id == OWNER_ID:
         db.set_balance(message.from_user.id, float('inf'))
-    await message.answer(f"✨ Добро пожаловать в систему Искр!\n\nИспользуйте меню или команды:\n• `перевести @ник сумма`", 
+    
+    await message.reply(f"✨ **Экономика Искр готова!**\n\n1 🌗 Луна = 2 ✨ Искры\n\nКоманда для перевода:\n`перевести @ник сумма`", 
                          reply_markup=main_menu(message.from_user.id), parse_mode="Markdown")
 
 @router.callback_query(F.data == "back_main")
 async def call_back(callback: types.CallbackQuery, state: FSMContext):
+    if not await is_owner_filter(callback): return
     await state.clear()
     await callback.message.edit_text("✨ Главное меню системы Искр:", reply_markup=main_menu(callback.from_user.id))
 
+# --- БАЛАНС ---
 @router.callback_query(F.data == "bal")
 async def call_bal(callback: types.CallbackQuery):
-    bal_sparks = db.get_balance(callback.from_user.id, BOT_ID)
-    bal_moons = db.get_balance(callback.from_user.id, MAIN_BOT_ID)
-    data = db.get_bot_data(callback.from_user.id)
+    if not await is_owner_filter(callback): return
+    s_bal = db.get_balance(callback.from_user.id, BOT_ID)
+    m_bal = db.get_balance(callback.from_user.id, MAIN_BOT_ID)
+    status = "❄️ ЗАМОРОЖЕН" if db.get_bot_data(callback.from_user.id).get('is_frozen') else "✅ Активен"
     
-    status = "❄️ Счёт ЗАМОРОЖЕН" if data.get('is_frozen') else "✅ Активен"
-    text = (f"💳 Ваши счета:\n\n"
-            f"✨ Искры: {bal_sparks:.0f}\n"
-            f"🌗 Луны: {bal_moons:.0f}\n\n"
-            f"Статус: {status}")
-    await callback.message.edit_text(text, reply_markup=main_menu(callback.from_user.id))
+    await callback.message.edit_text(
+        f"💳 **Ваши кошельки:**\n\n"
+        f"✨ Искры: `{s_bal:.0f}`\n"
+        f"🌗 Луны: `{m_bal:.0f}`\n\n"
+        f"Статус счета: {status}", 
+        reply_markup=main_menu(callback.from_user.id), parse_mode="Markdown"
+    )
 
+# --- ТОП ---
 @router.callback_query(F.data == "top")
 async def call_top(callback: types.CallbackQuery):
-    top = db.get_top_users()
-    text = "🏆 Топ владельцев Искр ✨:\n\n"
+    if not await is_owner_filter(callback): return
+    top = db.get_top_sparks()
+    text = "🏆 **Богатейшие пользователи (✨ Искры):**\n\n"
     for i, u in enumerate(top, 1):
         user = db.get_user(u['user_id'])
-        name = f"@{user['username']}" if user['username'] else user['name']
-        text += f"{i}. {name} — {u['balance']:.0f} ✨\n"
-    await callback.message.edit_text(text or "Пока пусто", reply_markup=main_menu(callback.from_user.id))
+        name = f"@{user['username']}" if user and user['username'] else f"ID:{u['user_id']}"
+        text += f"{i}. {name} — `{u['balance']:.0f}` ✨\n"
+    await callback.message.edit_text(text or "Топ пуст", reply_markup=main_menu(callback.from_user.id), parse_mode="Markdown")
 
-# ====================== ПЕРЕВОДЫ ТЕКСТОМ ======================
+# ====================== ПЕРЕВОДЫ (ТЕКСТОВАЯ КОМАНДА) ======================
 @router.message(F.text.regexp(r'(?i)^перевести\s+(.+)\s+(\d+)$'))
-async def fast_transfer(message: types.Message):
+async def transfer_logic(message: types.Message):
     match = re.match(r'(?i)^перевести\s+(.+)\s+(\d+)$', message.text)
-    receiver_input, amount = match.group(1).strip(), int(match.group(2))
-    
-    if db.get_bot_data(message.from_user.id).get('is_frozen'):
-        return await message.reply("❄️ Ваш счёт заморожен.")
+    who, amount = match.group(1).strip(), int(match.group(2))
+    sender_id = message.from_user.id
 
-    target_id = db.find_user(receiver_input)
-    if not target_id or target_id == message.from_user.id:
-        return await message.reply("❌ Пользователь не найден.")
+    if amount <= 0: return await message.reply("❌ Сумма должна быть больше нуля.")
+    if db.get_bot_data(sender_id).get('is_frozen'):
+        return await message.reply("❄️ Ваш счёт заморожен!")
+
+    target_id = db.find_user(who)
+    if not target_id or target_id == sender_id:
+        return await message.reply("❌ Пользователь не найден или вы указали себя.")
 
     if db.get_bot_data(target_id).get('is_frozen'):
         return await message.reply("❄️ Счёт получателя заморожен.")
 
-    sender_bal = db.get_balance(message.from_user.id)
-    if sender_bal != float('inf') and sender_bal < amount:
-        return await message.reply("❌ Недостаточно ✨ Искр.")
+    s_bal = db.get_balance(sender_id)
+    if s_bal != float('inf') and s_bal < amount:
+        return await message.reply(f"❌ Недостаточно ✨ Искр (Баланс: {s_bal:.0f})")
 
-    if sender_bal != float('inf'):
-        db.set_balance(message.from_user.id, sender_bal - amount)
+    # Транзакция
+    if s_bal != float('inf'):
+        db.set_balance(sender_id, s_bal - amount)
     db.set_balance(target_id, db.get_balance(target_id) + amount)
 
-    await message.reply(f"✅ Переведено {amount} ✨!")
-    try: await message.bot.send_message(target_id, f"✨ Вам пришло {amount} искр от @{message.from_user.username or message.from_user.id}")
+    t_user = db.get_user(target_id)
+    t_name = f"@{t_user['username']}" if t_user['username'] else f"ID:{target_id}"
+    await message.reply(f"✅ Переведено `{amount}` ✨ пользователю {t_name}", parse_mode="Markdown")
+    
+    try:
+        await message.bot.send_message(target_id, f"✨ Вам пришло `{amount}` искр от {message.from_user.full_name}")
     except: pass
 
 # ====================== КОНВЕРТАЦИЯ ======================
-@router.callback_query(F.data == "convert")
-async def convert_menu(callback: types.CallbackQuery):
+@router.callback_query(F.data == "conv")
+async def call_conv(callback: types.CallbackQuery):
+    if not await is_owner_filter(callback): return
     if db.get_bot_data(callback.from_user.id).get('is_frozen'):
-        return await callback.answer("❄️ Счёт заморожен!", show_alert=True)
+        return await callback.answer("❄️ Ваш счет заморожен!", show_alert=True)
     
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="✨ Искры -> 🌗 Луны", callback_data="conv_to_main"))
-    builder.row(InlineKeyboardButton(text="🌗 Луны -> ✨ Искры", callback_data="conv_from_main"))
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="back_main"))
-    
-    rate_text = f"📊 Курс: 1 🌗 = 2 ✨"
-    await callback.message.edit_text(f"{rate_text}\n\nВыберите направление:", reply_markup=builder.as_markup())
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="✨ Искры -> 🌗 Луны", callback_data="c_to_m"),
+           InlineKeyboardButton(text="🌗 Луны -> ✨ Искры", callback_data="c_fr_m"))
+    kb.row(InlineKeyboardButton(text="◀️ Назад", callback_data="back_main"))
+    await callback.message.edit_text("💱 **Обмен валют**\n\nКурс: 1 🌗 = 2 ✨", reply_markup=kb.as_markup(), parse_mode="Markdown")
 
-@router.callback_query(F.data.startswith("conv_"))
-async def convert_start(callback: types.CallbackQuery, state: FSMContext):
-    direction = callback.data
-    await state.update_data(direction=direction)
-    source = "✨ Искр" if direction == "conv_to_main" else "🌗 Лун"
-    await callback.message.edit_text(f"Введите количество {source} для обмена:", reply_markup=cancel_kb())
+@router.callback_query(F.data.startswith("c_"))
+async def conv_start(callback: types.CallbackQuery, state: FSMContext):
+    if not await is_owner_filter(callback): return
+    await state.update_data(dir=callback.data)
+    src = "✨ Искр" if callback.data == "c_to_m" else "🌗 Лун"
+    await callback.message.edit_text(f"Введите количество {src} для обмена:", reply_markup=cancel_kb())
     await state.set_state(EconomyStates.WaitingConvertAmount)
 
 @router.message(EconomyStates.WaitingConvertAmount)
-async def convert_process(message: types.Message, state: FSMContext):
-    if not message.text.isdigit(): return await message.answer("Введите число!")
-    amount = int(message.text)
+async def conv_proc(message: types.Message, state: FSMContext):
+    if not message.text.isdigit(): return await message.answer("Введите целое число.")
+    amt = int(message.text)
     data = await state.get_data()
     uid = message.from_user.id
 
-    from_bot = "sparks" if data['direction'] == "conv_to_main" else "main"
-    to_bot = "main" if data['direction'] == "conv_to_main" else "sparks"
+    f_bot = "sparks" if data['dir'] == "c_to_m" else "main"
+    t_bot = "main" if data['dir'] == "c_to_m" else "sparks"
     
-    source_bal = db.get_balance(uid, from_bot)
-    if source_bal == float('inf'): return await message.answer("❌ Недоступно для владельцев.")
-    if source_bal < amount: return await message.answer("❌ Недостаточно средств.")
+    s_bal = db.get_balance(uid, f_bot)
+    if s_bal == float('inf'): return await message.answer("❌ Владельцы не могут конвертировать бесконечность.")
+    if s_bal < amt: return await message.answer("❌ Недостаточно средств.")
 
-    res_amount = amount * (EXCHANGE_RATES[from_bot] / EXCHANGE_RATES[to_bot])
-    
-    db.set_balance(uid, source_bal - amount, from_bot)
-    db.set_balance(uid, db.get_balance(uid, to_bot) + res_amount, to_bot)
+    res = amt * (EXCHANGE_RATES[f_bot] / EXCHANGE_RATES[t_bot])
+    db.set_balance(uid, s_bal - amt, f_bot)
+    db.set_balance(uid, db.get_balance(uid, t_bot) + res, t_bot)
 
-    await message.answer(f"✅ Обмен завершен!\nПолучено: {res_amount:.0f}", reply_markup=main_menu(uid))
+    await message.answer(f"✅ Обмен завершен! Получено: `{res:.0f}`", reply_markup=main_menu(uid), parse_mode="Markdown")
     await state.clear()
 
-# ====================== АДМИНКА ======================
-@router.callback_query(F.data == "admin")
-async def call_admin(callback: types.CallbackQuery):
-    if callback.from_user.id != OWNER_ID: return
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="❄️ Заморозить", callback_data="adm_freeze"),
-                InlineKeyboardButton(text="🔥 Разморозить", callback_data="adm_unfreeze"))
-    builder.row(InlineKeyboardButton(text="💰 Выдать искры", callback_data="adm_give"))
-    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="back_main"))
-    await callback.message.edit_text("⚙️ Админ-панель:", reply_markup=builder.as_markup())
+# ====================== АДМИНКА (ТОЛЬКО ВЛАДЕЛЕЦ) ======================
+@router.callback_query(F.data == "adm")
+async def call_adm(callback: types.CallbackQuery):
+    if callback.from_user.id != OWNER_ID:
+        return await callback.answer("❌ Нет прав!", show_alert=True)
+    
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="❄️ Заморозить", callback_data="a_frz"),
+           InlineKeyboardButton(text="🔥 Разморозить", callback_data="a_unf"))
+    kb.row(InlineKeyboardButton(text="💰 Выдать искры", callback_data="a_give"))
+    kb.row(InlineKeyboardButton(text="◀️ Назад", callback_data="back_main"))
+    await callback.message.edit_text("⚙️ **Админ-панель**", reply_markup=kb.as_markup(), parse_mode="Markdown")
 
-@router.callback_query(F.data.startswith("adm_"))
-async def adm_action(callback: types.CallbackQuery, state: FSMContext):
-    action = callback.data[4:]
-    await state.update_data(action=action)
-    prompt = "выдать искры (ID Сумма):" if action == "give" else "введите ID/Ник для действия:"
-    await callback.message.edit_text(prompt, reply_markup=cancel_kb())
+@router.callback_query(F.data.startswith("a_"), F.from_user.id == OWNER_ID)
+async def adm_act(callback: types.CallbackQuery, state: FSMContext):
+    act = callback.data[2:]
+    await state.update_data(act=act)
+    p = "💰 Введите `@ник Сумма`:" if act == "give" else "❄️ Введите `@ник` пользователя:"
+    await callback.message.edit_text(p, reply_markup=cancel_kb())
     await state.set_state(EconomyStates.WaitingAdminAction)
 
-@router.message(EconomyStates.WaitingAdminAction)
-async def adm_process(message: types.Message, state: FSMContext):
-    data = await state.get_data()
+@router.message(EconomyStates.WaitingAdminAction, F.from_user.id == OWNER_ID)
+async def adm_end(message: types.Message, state: FSMContext):
+    d = await state.get_data()
     try:
-        if data['action'] == "give":
+        if d['act'] == "give":
             parts = message.text.split()
-            uid, amt = db.find_user(parts[0]), int(parts[1])
-            db.set_balance(uid, db.get_balance(uid) + amt)
-            await message.answer(f"✅ Выдано {amt} ✨")
+            u_id, a = db.find_user(parts[0]), int(parts[1])
+            db.set_balance(u_id, db.get_balance(u_id) + a)
+            await message.answer(f"✅ Выдано {a} ✨ пользователю {u_id}")
         else:
-            uid = db.find_user(message.text)
-            status = (data['action'] == "freeze")
-            db.set_bot_data(uid, is_frozen=status)
-            await message.answer(f"✅ Статус изменен.")
-    except: await message.answer("❌ Ошибка.")
+            u_id = db.find_user(message.text)
+            st = (d['act'] == "frz")
+            db.set_bot_data(u_id, is_frozen=st)
+            await message.answer(f"✅ Статус {u_id} изменен.")
+    except: await message.answer("❌ Ошибка ввода.")
     await state.clear()
+    await message.answer("Меню:", reply_markup=main_menu(message.from_user.id))
+
+# Фильтр-ловушка для посторонних в админ-режиме
+@router.message(EconomyStates.WaitingAdminAction)
+async def adm_trap(message: types.Message):
+    pass 
 
 # ====================== ЗАПУСК ======================
 async def main():
     bot = Bot(token=TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
-    logger.info("✨ Бот Искр запущен!")
+    logger.info("✨ Sparks Bot started!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
