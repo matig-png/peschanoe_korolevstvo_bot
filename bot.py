@@ -4,7 +4,7 @@ import os
 import re
 from datetime import datetime
 from typing import Optional, Dict, Any, List
-from html import escape # Для защиты от спецсимволов в именах
+from html import escape # Защита от спецсимволов в именах
 
 from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.filters import Command, StateFilter, CommandObject
@@ -16,6 +16,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
+# Загрузка настроек
 load_dotenv()
 
 # ====================== КОНФИГУРАЦИЯ ======================
@@ -24,10 +25,11 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OWNER_ID = int(os.getenv("MAIN_ADMIN_ID"))
 
-BOT_ID = "sparks"        
-MAIN_BOT_ID = "main"     
-STARTING_BALANCE = 400   
+BOT_ID = "sparks"        # Текущий бот (Искры ✨)
+MAIN_BOT_ID = "main"     # Основной бот (Луны 🌗)
+STARTING_BALANCE = 400   # Начальный капитал
 
+# КУРС: 1 Луна = 2 Искры (0.5 Луны за 1 Искру)
 EXCHANGE_RATES = {"main": 1.0, "sparks": 0.5}
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -98,8 +100,9 @@ class EconomyStates(StatesGroup):
     WaitingConvertAmount = State()
     WaitingAdminAction = State()
 
-# ====================== ФИЛЬТРЫ ======================
-async def is_owner_filter(callback: CallbackQuery):
+# ====================== ИЗОЛЯЦИЯ КНОПОК ======================
+async def is_menu_owner(callback: CallbackQuery):
+    """Проверяет, что на кнопку нажал тот, кто вызвал меню."""
     if callback.message.reply_to_message:
         if callback.from_user.id != callback.message.reply_to_message.from_user.id:
             await callback.answer("❌ Это не ваше меню! Вызовите своё через /start", show_alert=True)
@@ -110,7 +113,7 @@ async def is_owner_filter(callback: CallbackQuery):
 def main_menu(user_id: int):
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="✨ Мой Баланс", callback_data="bal"),
-                InlineKeyboardButton(text="🏆 Топ Искр", callback_data="top"))
+                InlineKeyboardButton(text="🏆 Топ богачей", callback_data="top"))
     builder.row(InlineKeyboardButton(text="💱 Обмен валют", callback_data="conv"))
     if user_id == OWNER_ID:
         builder.row(InlineKeyboardButton(text="⚙️ Админ-панель", callback_data="adm"))
@@ -128,8 +131,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
     db.create_or_update_user(message.from_user)
     db.set_bot_data(message.from_user.id, activated_at=datetime.now().isoformat())
     
-    sp_bal = db.get_balance(message.from_user.id, BOT_ID)
-    if sp_bal is None:
+    # Выдача начального баланса
+    if db.get_balance(message.from_user.id, BOT_ID) is None:
         db.set_balance(message.from_user.id, STARTING_BALANCE, BOT_ID)
         await message.answer(f"🎁 Вам начислено приветственные {STARTING_BALANCE} ✨ Искр!")
 
@@ -139,14 +142,14 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
 @router.callback_query(F.data == "back_main")
 async def call_back(callback: types.CallbackQuery, state: FSMContext):
-    if not await is_owner_filter(callback): return
+    if not await is_menu_owner(callback): return
     await state.clear()
     await callback.message.edit_text("✨ Главное меню системы Искр:", reply_markup=main_menu(callback.from_user.id), parse_mode="HTML")
 
 # --- БАЛАНС ---
 @router.callback_query(F.data == "bal")
 async def call_bal(callback: types.CallbackQuery):
-    if not await is_owner_filter(callback): return
+    if not await is_menu_owner(callback): return
     s_bal = db.get_balance(callback.from_user.id, BOT_ID) or 0
     m_bal = db.get_balance(callback.from_user.id, MAIN_BOT_ID) or 0
     status = "❄️ ЗАМОРОЖЕН" if db.get_bot_data(callback.from_user.id).get('is_frozen') else "✅ Активен"
@@ -162,20 +165,27 @@ async def call_bal(callback: types.CallbackQuery):
         reply_markup=main_menu(callback.from_user.id), parse_mode="HTML"
     )
 
-# --- ТОП ---
+# --- ТОП (ИСПРАВЛЕННЫЙ) ---
 @router.callback_query(F.data == "top")
 async def call_top(callback: types.CallbackQuery):
-    if not await is_owner_filter(callback): return
+    if not await is_menu_owner(callback): return
     top = db.get_top_sparks()
-    text = "🏆 <b>Богатейшие (✨ Искры):</b>\n\n"
+    text = "🏆 <b>Топ богачей (✨ Искры):</b>\n\n"
+    
     for i, u in enumerate(top, 1):
         user = db.get_user(u['user_id'])
-        # Экранируем имя, чтобы символы типа "_" не ломали верстку
-        name = escape(f"@{user['username']}") if user and user['username'] else f"ID:<code>{u['user_id']}</code>"
+        if user and user.get('username'):
+            name = f"@{escape(user['username'])}"
+        elif user and user.get('name'):
+            name = escape(user['name'])
+        else:
+            name = f"ID:<code>{u['user_id']}</code>"
+            
         text += f"{i}. {name} — <code>{u['balance']:.0f}</code> ✨\n"
+    
     await callback.message.edit_text(text if top else "Топ пуст", reply_markup=main_menu(callback.from_user.id), parse_mode="HTML")
 
-# ====================== ПЕРЕВОДЫ ======================
+# ====================== ПЕРЕВОДЫ (ТЕКСТОМ) ======================
 @router.message(F.text.regexp(r'(?i)^перевести\s+(.+)\s+(\d+)$'))
 async def fast_transfer(message: types.Message):
     match = re.match(r'(?i)^перевести\s+(.+)\s+(\d+)$', message.text)
@@ -197,6 +207,7 @@ async def fast_transfer(message: types.Message):
     if s_bal != float('inf') and s_bal < amount:
         return await message.reply(f"❌ Недостаточно ✨ Искр.")
 
+    # Проведение транзакции
     if s_bal != float('inf'):
         db.set_balance(sender_id, s_bal - amount, BOT_ID)
     
@@ -215,7 +226,7 @@ async def fast_transfer(message: types.Message):
 # ====================== КОНВЕРТАЦИЯ ======================
 @router.callback_query(F.data == "conv")
 async def call_conv(callback: types.CallbackQuery):
-    if not await is_owner_filter(callback): return
+    if not await is_menu_owner(callback): return
     if db.get_bot_data(callback.from_user.id).get('is_frozen'):
         return await callback.answer("❄️ Ваш счет заморожен!", show_alert=True)
     
@@ -227,7 +238,7 @@ async def call_conv(callback: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith("c_"))
 async def conv_start(callback: types.CallbackQuery, state: FSMContext):
-    if not await is_owner_filter(callback): return
+    if not await is_menu_owner(callback): return
     await state.update_data(dir=callback.data)
     src = "✨ Искр" if callback.data == "c_to_m" else "🌗 Лун"
     await callback.message.edit_text(f"Введите сумму {src} для обмена:", reply_markup=cancel_kb(), parse_mode="HTML")
@@ -245,7 +256,7 @@ async def conv_proc(message: types.Message, state: FSMContext):
     
     s_bal = db.get_balance(uid, f_bot) or 0
     if s_bal == float('inf'): 
-        return await message.answer("❌ Ошибка: Нельзя конвертировать бесконечность.")
+        return await message.answer("❌ Ошибка: Нельзя конвертировать бесконечную валюту.")
     if s_bal < amt: 
         return await message.answer("❌ Недостаточно средств.")
 
@@ -259,7 +270,7 @@ async def conv_proc(message: types.Message, state: FSMContext):
     await message.answer(f"✅ Обмен завершен! Получено: <code>{res:.0f}</code>", reply_markup=main_menu(uid), parse_mode="HTML")
     await state.clear()
 
-# ====================== АДМИНКА ======================
+# ====================== АДМИНКА (ТОЛЬКО ВЛАДЕЛЬЦУ) ======================
 @router.callback_query(F.data == "adm")
 async def call_adm(callback: types.CallbackQuery):
     if callback.from_user.id != OWNER_ID: return
@@ -299,6 +310,7 @@ async def adm_end(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Меню:", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
 
+# Заглушка для посторонних в админ-состоянии
 @router.message(EconomyStates.WaitingAdminAction)
 async def adm_trap(message: types.Message):
     pass 
@@ -308,7 +320,7 @@ async def main():
     bot = Bot(token=TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
-    logger.info("✨ Sparks Bot started (HTML mode)!")
+    logger.info("✨ Sparks Bot started!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
